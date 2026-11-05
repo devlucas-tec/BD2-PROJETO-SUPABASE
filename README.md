@@ -81,6 +81,16 @@ Execute os scripts no **SQL Editor** rigorosamente na ordem numérica:
    * Aplica correção de compatibilidade com o pooler do Supabase utilizando `NULLIF(..., '')` nas políticas de identidade.
 5. `src/main/sql/05_ddl_rls_cupom_avaliacao.sql`
    * Cria sequências, tabelas e policies de `cupom` e `avaliacao` (catálogo restrito de cupons; avaliações de leitura pública assinadas pelo autor) e concede permissões.
+6. `src/main/sql/06_ddl_carrinho.sql` a `10_teste_isolamento_carrinho.sql`
+   * Criam `carrinho` e `item_carrinho` e suas policies. Os scripts `08` e `10` são validações.
+7. `src/main/sql/11_ddl_rls_pedido_item_pedido.sql`
+   * Cria `pedido` e `item_pedido` e suas policies.
+8. `src/main/sql/12_fix_rls_pedido_carrinho.sql`
+   * Corrige a recursão entre as policies de pedido, adiciona `NULLIF` nas policies de carrinho e cria a baixa de estoque usada pelo checkout.
+9. `src/main/sql/13_ddl_rls_endereco.sql`
+   * Cria `endereco` e suas policies.
+10. `src/main/sql/14_ddl_pagamento_entrega_devolucao.sql` e `15_rls_pagamento_entrega_devolucao.sql`
+    * Criam as tabelas de pós-venda e suas policies.
 
 > **⚠️ Sobre os blocos de validação:** os scripts terminam com um bloco `DO $$` que testa as próprias policies. Ele é **pulado de propósito** quando executado pelo SQL Editor, porque o usuário `postgres` do Supabase tem `BYPASSRLS` e as policies nem chegam a ser avaliadas para ele. A validação efetiva do RLS está nos testes de integração, que conectam como `app_ecommerce` (ver seção de Testes).
 
@@ -119,6 +129,26 @@ DB_PASSWORD=sua_senha_aqui
 | **`avaliacao`** | `SELECT` | Público (faz parte da vitrine do produto). |
 | **`avaliacao`** | `INSERT` | Só em nome próprio (`id_cliente = app.usuario_id`) ou `ADMIN`. |
 | **`avaliacao`** | `UPDATE` / `DELETE` | Exclusivo do autor (`id_cliente = app.usuario_id`) ou `ADMIN`. |
+| **`carrinho` / `item_carrinho`** | `SELECT` | Cliente dono ou `ADMIN`. |
+| **`carrinho` / `item_carrinho`** | `INSERT` / `UPDATE` / `DELETE` | Exclusivo do cliente dono. |
+| **`pedido`** | `SELECT` | Cliente dono, vendedor com produto no pedido ou `ADMIN`. |
+| **`pedido`** | `INSERT` / `UPDATE` | Cliente dono ou `ADMIN`. |
+| **`pedido`** | `DELETE` | Exclusivo para usuários com papel `ADMIN`. |
+| **`item_pedido`** | `SELECT` | Cliente dono do pedido, vendedor do produto ou `ADMIN`. |
+| **`item_pedido`** | `INSERT` / `UPDATE` / `DELETE` | Cliente dono do pedido ou `ADMIN`. |
+| **`endereco`** | Todas | Cliente dono ou `ADMIN`. |
+| **`pagamento`** | `SELECT` | Cliente dono do pedido ou `ADMIN`. **O vendedor não tem acesso.** |
+| **`pagamento`** | `INSERT` | Cliente dono, apenas como `PENDENTE`, ou `ADMIN`. |
+| **`pagamento`** | `UPDATE` / `DELETE` | Exclusivo para usuários com papel `ADMIN`. |
+| **`entrega`** | `SELECT` | Cliente dono, vendedor com produto no pedido ou `ADMIN`. |
+| **`entrega`** | `INSERT` / `UPDATE` | Vendedor com produto no pedido ou `ADMIN`. |
+| **`entrega`** | `DELETE` | Exclusivo para usuários com papel `ADMIN`. |
+| **`devolucao`** | `SELECT` | Cliente dono, vendedor com produto no pedido ou `ADMIN`. |
+| **`devolucao`** | `INSERT` | Cliente dono, apenas como `SOLICITADA`, ou `ADMIN`. |
+| **`devolucao`** | `UPDATE` | Vendedor com produto no pedido ou `ADMIN`. |
+| **`devolucao`** | `DELETE` | Exclusivo para usuários com papel `ADMIN`. |
+
+O resultado medido de cada papel, tabela e operação está em [`docs/relatorio-rls.md`](docs/relatorio-rls.md).
 
 > **Por que `cupom` checa a data e não só o status:** a tarefa da issue #9 fala em "só veem `status = 'ATIVO'`", mas o critério de aceite exige que **cupom expirado** também não apareça. Um cupom `ATIVO` com `data_expiracao` no passado passaria pelo filtro de status e continuaria visível — por isso a policy exige as duas condições.
 
@@ -211,6 +241,36 @@ Cada um monta o próprio cenário, exercita as operações sob identidades difer
 
 ---
 
+## 🛒 Pedido e Pós-venda
+
+| DAO | Método | Observação |
+| :--- | :--- | :--- |
+| `PedidoDAO` | CRUD, `findByCliente`, `findByVendedor`, `atualizarStatus` | O vendedor enxerga, mas não altera, os pedidos com produtos dele. |
+| `PedidoDAO` | `checkout(String codigoCupom)` | Fecha a compra do usuário autenticado em uma única transação. |
+| `ItemPedidoDAO` | `saveBatch`, `findByPedido` | Grava em lote; aceita a conexão do checkout. |
+| `EnderecoDAO` | CRUD, `findByCliente` | Dado pessoal, restrito ao cliente dono ou `ADMIN`. |
+| `PagamentoDAO` | CRUD, `findByPedido`, `atualizarStatus` | Só `ADMIN` altera o status. |
+| `EntregaDAO` | CRUD, `findByPedido`, `findByCodigoRastreamento`, `atualizarStatus` | O vendedor do pedido despacha e atualiza. |
+| `DevolucaoDAO` | CRUD, `findByPedido`, `findByStatus`, `atualizarStatus` | O cliente solicita; o vendedor do pedido ou o `ADMIN` decide. |
+
+### Como o checkout funciona
+
+Tudo acontece na mesma transação: cria o pedido, insere os itens, baixa o estoque e limpa o carrinho. Se algo falhar, nada é gravado.
+
+* **Preço e total:** são calculados com o preço atual do produto, nunca com o valor do carrinho ou enviado pelo cliente.
+* **Cliente:** vem do `TenantContext`, nunca de um parâmetro.
+* **Estoque:** `produto_update` não alcança o cliente, então a baixa é feita pela função `baixar_estoque_pedido`. Ela só aceita pedidos do próprio cliente, lê os itens do pedido e não pode ser repetida.
+
+### Carga inicial
+
+`MainSeed` cria 1 admin, 3 clientes, 2 vendedores, categorias, produtos e pedidos cruzados. Ela não apaga nada, e rodar de novo não altera os dados:
+
+```bash
+java -cp target/crud-jpa-template-0.0.1-SNAPSHOT.jar br.edu.ifpb.es.daw.main.MainSeed
+```
+
+---
+
 ## 🧪 Testes e Compilação
 
 Para compilar o projeto:
@@ -231,6 +291,9 @@ Os testes conectam no banco como `app_ecommerce` — uma role **sem** `BYPASSRLS
 | `CatalogoDaoIntegrationTest` | DAOs de `categoria` e `produto` e a estratégia de carga do `RowMapper` (issue #8). |
 | `CupomAvaliacaoRlsIntegrationTest` | Policies de `cupom` e `avaliacao` em SQL cru (issue #9), incluindo os dois critérios de aceite. |
 | `CupomAvaliacaoDaoIntegrationTest` | DAOs de `cupom` e `avaliacao` (issue #10): mapeamento, agregação, carimbo de data e comportamento sob cada identidade. |
+| `PedidoPosVendaIntegrationTest` | Checkout, endereço e pós-venda (issues #15 a #19), incluindo rollback e os critérios de aceite de cada issue. |
+
+A matriz completa de RLS, por papel, tabela e operação, está em `docs/testes-rls.sql`.
 
 Cada classe é **pulada** (não quebrada) quando falta o `.env` na raiz ou quando as tabelas que ela testa ainda não foram criadas.
 
