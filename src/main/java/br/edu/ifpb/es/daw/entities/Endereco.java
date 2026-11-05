@@ -18,6 +18,16 @@ public class Endereco {
 
     private String estado;
 
+    private Long idCliente;
+
+    public Long getIdCliente() {
+        return idCliente;
+    }
+
+    public void setIdCliente(Long idCliente) {
+        this.idCliente = idCliente;
+    }
+
     public Endereco() {
     }
 

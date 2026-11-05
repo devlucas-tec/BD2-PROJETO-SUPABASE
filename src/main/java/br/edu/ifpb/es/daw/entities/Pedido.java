@@ -14,6 +14,27 @@ public class Pedido {
 
     private StatusPedido status;
 
+    private Long idCliente;
+
+    /** Opcional: cupom é benefício, não obrigação (ver 11_ddl_rls_pedido_item_pedido.sql). */
+    private Long idCupom;
+
+    public Long getIdCliente() {
+        return idCliente;
+    }
+
+    public void setIdCliente(Long idCliente) {
+        this.idCliente = idCliente;
+    }
+
+    public Long getIdCupom() {
+        return idCupom;
+    }
+
+    public void setIdCupom(Long idCupom) {
+        this.idCupom = idCupom;
+    }
+
     public Pedido() {
     }
 

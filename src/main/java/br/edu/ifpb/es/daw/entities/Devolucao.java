@@ -11,7 +11,22 @@ public class Devolucao {
 
     private String motivo;
 
-    private StatusDevolucao status = StatusDevolucao.APROVADA;
+    // Toda devolução nasce pendente: quem aprova ou recusa é o vendedor ou o ADMIN.
+    private StatusDevolucao status = StatusDevolucao.SOLICITADA;
+
+    private Long idPedido;
+
+    public Long getIdPedido() {
+        return idPedido;
+    }
+
+    public void setIdPedido(Long idPedido) {
+        this.idPedido = idPedido;
+    }
+
+    public void setStatus(StatusDevolucao status) {
+        this.status = status;
+    }
 
     public Devolucao() {
     }
